@@ -1,0 +1,392 @@
+---
+title: "Final Project"
+author: "Lynn Niu"
+date: "2020/12/2"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(ggplot2)
+library(corrplot)
+library(mice)
+library(tidyverse)
+library(knitr)
+library(leaps)
+library(mgcv)
+library(caret)
+
+```
+
+## Data cleaning
+```{r}
+# dat = read.csv(C:/Users/gvmer_000/Documents/STAT413_Final/MyFoodData_csv_version.csv")
+# names(dat)[1]="ID"
+# dat %>% 
+#   select(ID, name, Food.Group, Calories, Fat=Fat..g., 
+#          Protein=Protein..g., Carbohd=Carbohydrate..g., 
+#          Sugars=Sugars..g., Fiber=Fiber..g., Water=Water..g.) -> dat
+# 
+# write.csv(dat, "C:/R_Projects/stat413/Datasets/MyFoodData_cleaned.csv", row.names=FALSE)
+```
+
+
+```{r}
+read.csv("C:/Users/gvmer_000/Documents/STAT413_Final/MyFoodData_cleaned.csv") %>% 
+  mutate_at("Sugars", as.numeric) %>% 
+  mutate_at("Fiber", as.numeric) -> df
+
+#visualize missing values
+df %>%
+  gather(key = "key", value = "val") %>%
+  mutate(is.missing = is.na(val)) %>%
+  group_by(key, is.missing) %>%
+  summarise(num.missing = n()) %>%
+  filter(is.missing==T) %>%
+  select(-is.missing) %>%
+  arrange(desc(num.missing)) -> missing.values
+    
+missing.values  %>% kable()
+
+#percent missing
+#Sugars
+1786/14164
+#Fiber
+562/14164
+
+```
+* missing values in Sugars, Fiber -> impute with mean or linear regression
+
+## Impute dataset
+```{r}
+#impute NA with mean of each column
+df_imputed <- complete(mice(data = df, method = "pmm"))
+
+#check density plots after imputation
+par(mfrow=c(2,1))
+plot(density(df$Sugars, na.rm=TRUE), lwd=1, col="blue", xlim = c(0,20), main = "Density Plot of Sugars")
+lines(density(df_imputed$Sugars))
+legend("topright", legend=c("before imputation", "after imputation"),
+       col=c("blue", "black"), lty=1, cex=0.8)
+
+plot(density(df$Fiber, na.rm=TRUE), lwd=1, col="blue", xlim = c(0,20), main = "Density Plot of Fiber")
+lines(density(df_imputed$Fiber))
+legend("topright", legend=c("before imputation", "after imputation"),
+       col=c("blue", "black"), lty=1, cex=0.8)
+
+dev.off()
+```
+* Sugars has a increment at the peak
+
+## Data exploration
+```{r, fig.align='center'}
+#correlation matrix
+cormat <- round(cor(df_imputed[4:10], use = "complete.obs"),2)
+head(cormat)
+
+corrplot(cormat)
+
+```
+Calories has:
+
+* positive correlation with Fat, Carbohydrates
+* negative correlation with only Water
+
+```{r, fig.align='center'}
+plot(df_imputed[4:10])
+```
+
+* Calories seems to have a linear relationship with Fat and Water
+
+
+
+## Modeling
+
+#### Set training, testing sets (1/5 of dataset)
+
+Each time we use training set to train the model and use testing set to assess model and compute MSE to compare models.
+```{r}
+set.seed(100)
+test = sample(nrow(df),nrow(df)/6)
+train = -test
+df.test = df_imputed[test,]
+df.train = df_imputed[train,]
+```
+
+### Linear regression
+
+#### With 10-fold CV 
+```{r}
+train_control <- trainControl(method="cv", number=10)
+model_caret <- train(Calories~., data = df.train[4:10],   # model to fit
+                     trControl = train_control,              # folds
+                     method = "lm")                      # specifying regression model
+
+model_caret
+model_caret$finalModel
+(MSE.lm.cv = mean((predict(model_caret, newdata = df.test[5:10])-df.test$Calories)^2))
+```
+
+#### With best subset selection
+```{r, fig.align='center'}
+regfit.full = regsubsets(Calories~., data = df_imputed[4:10])
+reg.summary = summary(regfit.full)
+reg.summary
+
+which.max(reg.summary$adjr2)
+which.min(reg.summary$cp)
+which.min(reg.summary$bic)
+
+par(mfrow =c(2,2))
+plot(reg.summary$rss, xlab="Number of Variables", ylab="RSS", type="l")
+plot(reg.summary$adjr2, xlab ="Number of Variables", ylab="Adjusted R^2",type="l")
+points(6, reg.summary$adjr2[6], col ="red", cex =2, pch =20)
+plot(reg.summary$cp, xlab = "Number of Variables", ylab="Cp", type="l")
+points(6, reg.summary$cp[6], col ="red", cex =2, pch =20)
+plot(reg.summary$bic, xlab="Number of Variables ", ylab=" BIC", type="l")
+points(6, reg.summary$bic[6], col ="red", cex =2, pch =20)
+dev.off()
+
+coef(regfit.full, 3)
+coef(regfit.full, 4)
+coef(regfit.full, 5)
+```
+* we might choose 3~5 predictors
+
+```{r}
+#3 variables
+fit.lm3 = lm(Calories~Fat + Fiber + Water, data = df.train[4:10])
+(MSE.lm.3var = mean((predict(fit.lm3, newdata = df.test)-df.test$Calories)^2))
+#4 variables
+fit.lm4 = lm(Calories~Fat + Fiber + Protein + Carbohd, data = df.train[4:10])
+(MSE.lm.4var = mean((predict(fit.lm4, newdata = df.test)-df.test$Calories)^2))
+#5 variables
+fit.lm5 = lm(Calories~Fat + Fiber + Water + Protein + Carbohd, data = df.train[4:10])
+(MSE.lm.5var = mean((predict(fit.lm5, newdata = df.test)-df.test$Calories)^2))
+```
+
+* lm with 3 variables produces a smaller MSE
+
+
+### Generalized Linear Model
+
+### Ridge Regression
+```{r}
+library(glmnet)
+x = model.matrix(Calories~., df.train[4:10])[,-1]
+y = df.train$Calories
+lambdas = 10^seq(10,-2,length=100)
+ridge.mod = glmnet(x,y,alpha=0,lambda=lambdas)
+ridge.cv = cv.glmnet(x,y,alpha=0)
+plot(ridge.cv)
+bestlam = ridge.cv$lambda.min
+bestlam
+x2 = model.matrix(Calories~., df.test[4:10])[,-1]
+ridge.pred = predict(ridge.mod, s=bestlam, newx=x2)
+(MSE.ridge = mean((ridge.pred-df.test$Calories)^2))
+```
+
+### Lasso Regression
+```{r}
+lasso.mod = glmnet(x,y,alpha=1,lambda=lambdas)
+lasso.cv = cv.glmnet(x,y,alpha=1)
+plot(lasso.cv)
+bestlam = lasso.cv$lambda.min
+bestlam
+lasso.pred = predict(lasso.mod, s=bestlam, newx=x2)
+(MSE.lasso = mean((lasso.pred-df.test$Calories)^2))
+```
+
+### Generalized Additive Model
+
+#### MSE of gam 
+```{r}
+fit.gam = gam(Calories~s(Protein) + s(Fat) + s(Carbohd) + s(Fiber) + s(Sugars) + s(Water), data = df.train[4:10])
+summary(fit.gam)
+(MSE.gam = mean((predict(fit.gam, newdata = df.test)-df.test$Calories)^2))
+```
+
+* The true model might/ might not be flexible
+
+#### 10-fold CV with boosted gam
+```{r, fig.align='center'}
+library(mboost)
+library(import)
+set.seed(100)
+train_control <- trainControl(method="cv", number=10)
+Grid <- expand.grid(.mstop=seq(100,500,10),.prune=c(0.5))
+fit.gamboost <- train(Calories~., data = df.train[4:10],
+                      method = 'gamboost',
+                      trControl = train_control, 
+                      tuneGrid=Grid, 
+                      metric='RMSE',
+                      maximize=FALSE)
+plot(fit.gamboost)
+plot(varImp(fit.gamboost))
+
+(MSE.gam.boosted = mean((predict(fit.gamboost, newdata = df.test)-df.test$Calories)^2))
+```
+
+* MSE decreases with boosting
+
+
+### Decision Tree
+
+#### Decision Tree and Pruning
+```{r, fig.align='center'}
+library(ISLR)
+library(tree)
+set.seed(100)
+fit.tree = tree(Calories~., df.train[4:10])
+plot(fit.tree)
+text(fit.tree, pretty = 0)
+summary(fit.tree)
+
+#use cv to see if pruning works
+cv.fit.tree = cv.tree(fit.tree)
+plot(cv.fit.tree$size, cv.fit.tree$dev, type='b', xlab = "Tree Size", ylab="CV Error")
+#pruning is unnecessary
+
+# #Pruning (same result)
+# prune.fit.tree =prune.tree(fit.tree,best = 8)
+# plot(prune.fit.tree)
+# text(prune.fit.tree, pretty = 0)
+
+(MSE.tree = mean((predict(fit.tree, newdata = df.test)-df.test$Calories)^2))
+
+```
+
+* Decision tree only uses Water and Fat
+* Large MSE on testing set
+
+#### Random Forest & Bagging
+```{r, fig.align='center'}
+library(randomForest)
+# Try different tree depth
+set.seed(100)
+
+rf1 <- randomForest(Calories~., df.train[4:10], mtry=6, #m = p
+                    xtest = df.test[, 5:10], ytest = df.test[, 4], ntree =500)
+rf2 <- randomForest(Calories~., df.train[4:10], mtry=6/2, #m = p/2
+                    xtest = df.test[, 5:10], ytest = df.test[, 4], ntree =500)
+rf3 <- randomForest(Calories~., df.train[4:10], mtry=sqrt(6), #m = sqrt(p)
+                    xtest = df.test[, 5:10], ytest = df.test[, 4], ntree =500)
+
+plot(1:500, rf1$test$mse, col="orange",type="l",xlab = "Number of Trees", ylab = "Test Error", main ="Testing Error with Different rf Depth", ylim = c(70,140))
+lines(1:500, rf2$test$mse, col="blue")
+lines(1:500, rf3$test$mse, col="green")
+legend("topright", c("m = p", "m = p/2", "m = sqrt(p)"), col = c("orange", "blue", "green"),
+cex = 1, lty = 1)
+
+
+# Use m=p/2=3
+set.seed(100)
+fit.rf = randomForest(Calories~., df.train[4:10], mtry = 3, importance =TRUE)
+fit.rf
+
+yhat.rf = predict(fit.rf, newdata = df.test)
+
+(MSE.rf = mean((yhat.rf - df.test$Calories)^2))
+varImpPlot(fit.rf) #Water and Fat are most important
+```
+
+#### Boosting
+```{r, fig.align='center'}
+library(gbm)
+#select lambda
+set.seed(100)
+pows <- seq(-5, -0.2, by = 0.1)
+lambdas <- 10^pows
+test.err <- rep(NA, length(lambdas))
+for (i in 1:length(lambdas)) {
+    boost.hitters <- gbm(Calories~., df.train[4:10], distribution = "gaussian", 
+                         n.trees = 1000, shrinkage = lambdas[i],
+                         interaction.depth = 3)
+    yhat <- predict(boost.hitters, df.test, n.trees = 1000)
+    test.err[i] <- mean((yhat - df.test$Calories)^2)
+}
+plot(lambdas, test.err, type = "b", 
+     xlab = "Shrinkage values", ylab = "Test MSE", ylim = c(0,600), main = "Test MSE vs lambda")
+
+min(test.err)
+lambdas[which.min(test.err)]
+#lambda=0.079
+
+#Boosting model
+set.seed(100)
+fit.boost = gbm(Calories~., df.train[4:10], distribution= "gaussian" , shrinkage = 0.079, n.trees =5000, interaction.depth=3)
+summary(fit.boost)
+yhat.boost=predict(fit.boost, newdata =df.test, n.trees =5000)
+(MSE.boosting = mean((yhat.boost -df.test$Calories)^2))
+
+```
+
+
+### Neural Network
+```{r, fig.align='center'}
+library(neuralnet)
+library(scales)
+# Scale the Data
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+df_scaled <- as.data.frame(cbind(df_imputed[,1:3],lapply(df_imputed[,4:10], normalize )))
+
+df.test.s = df_scaled[test,]
+df.train.s = df_scaled[-test,]
+
+## NN1
+set.seed(100)
+fit.NN1 <- neuralnet(Calories~., df.train.s[4:10], 
+                     hidden = c(1,1), threshold = 0.05)
+plot(fit.NN1, rep = 'best')
+Test_NN1_Output <- compute(fit.NN1, df.test.s[,5:10])$net.result
+NN1_Test_SSE <- sum((Test_NN1_Output - df.test.s[,4])^2)/2
+NN1_Test_SSE
+
+## NN2
+set.seed(100)
+fit.NN2 <- neuralnet(Calories~., df.train.s[4:10], 
+                     hidden = c(5,3), threshold = 0.05)
+plot(fit.NN2, rep = 'best')
+Test_NN2_Output <- compute(fit.NN2, df.test.s[,5:10])$net.result #scaled predicted
+NN2_Test_SSE <- sum((Test_NN2_Output - df.test.s[,4])^2)/2
+NN2_Test_SSE #scaled SSE
+
+#unscale:
+
+predicted = Test_NN1_Output * abs(diff(range(df_imputed$Calories))) + min(df_imputed$Calories)
+actual = df.test$Calories
+(MSE.nn = mean((actual - predicted)^2))
+
+predicted = Test_NN2_Output * abs(diff(range(df_imputed$Calories))) + min(df_imputed$Calories)
+actual = df.test$Calories
+(MSE.nn2 = mean((actual - predicted)^2))
+
+#NN3: best NN2 from different initial weights
+# fit.NN3 <- neuralnet(Calories~., df.train.s[3:10], 
+#                      hidden = c(3,2), rep=10)
+# plot(fit.NN3, rep = 'best')
+# Test_NN3_Output <- compute(fit.NN3, df.test.s[,4:10])$net.result
+# NN3_Test_SSE <- sum((Test_NN3_Output - df.test.s[,3])^2)/2
+# NN3_Test_SSE
+# 
+# #unscale:
+# predicted = Test_NN3_Output * abs(diff(range(df_imputed$Calories))) + min(df_imputed$Calories)
+# actual = df.test$Calories
+# mean((actual - predicted)^2)
+```
+
+## Comparison and conclusion
+```{r}
+comparison = data.frame("models" = c("lm.cv", "lm.3var", "lm.4var", "lm.5var", "ridge", "lasso", "gam",
+                                      "gam.boosted", "tree", "rf", "boosting", "NN (1 Layer)", "NN (2 layers)"),
+                           "MSE" = c(MSE.lm.cv, MSE.lm.3var, MSE.lm.4var, MSE.lm.5var, MSE.ridge,
+                                   MSE.lasso, MSE.gam, MSE.gam.boosted, MSE.tree, MSE.rf,
+                                   MSE.boosting, MSE.nn, MSE.nn2))
+comparison %>% kable
+```
